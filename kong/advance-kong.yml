@@ -1,0 +1,194 @@
+_format_version: "3.0"
+_transform: true
+
+# ---------- Upstreams & Targets (load balancing + health checks) ----------
+upstreams:
+  - name: product-upstream
+    hash_on: none
+    healthchecks:
+      active:
+        type: http
+        http_path: /health
+        healthy:
+          interval: 5
+          successes: 1
+          http_statuses: [200, 204]
+        unhealthy:
+          interval: 5
+          http_failures: 3
+          tcp_failures: 3
+    targets:
+      - target: "product-1:8080"
+        weight: 100
+      - target: "product-2:8080"
+        weight: 10  # can be used for blue/green or capacity differences
+
+  - name: user-upstream
+    healthchecks:
+      active:
+        type: http
+        http_path: /health
+        healthy:
+          interval: 5
+          successes: 1
+          http_statuses: [200]
+        unhealthy:
+          interval: 5
+          http_failures: 3
+    targets:
+      - target: "user-1:3000"
+        weight: 100
+
+# ---------- Services & Routes ----------
+services:
+  - name: product-catalog-service
+    url: http://product-upstream
+    routes:
+      - name: products-route
+        paths: ["/api/products"]
+        strip_path: false
+        methods: ["GET","POST","PUT","DELETE"]
+        # route-level plugins (applies only to this route)
+        plugins:
+          - name: cors
+            config:
+              origins: ["*"]
+              methods: ["GET","POST","PUT","DELETE","OPTIONS"]
+              headers: ["Authorization","Content-Type","Accept"]
+              exposed_headers: ["X-Request-ID"]
+              max_age: 3600
+          - name: request-size-limiting
+            config:
+              allowed_payload_size: 1048576   # 1 MB
+          - name: rate-limiting
+            config:
+              second: 20            # route-specific (override global)
+              minute: 1000
+              policy: local
+              limit_by: consumer
+
+  - name: user-service
+    url: http://user-upstream
+    routes:
+      - name: users-route
+        paths: ["/api/users"]
+        strip_path: false
+        methods: ["GET","POST","PUT","DELETE"]
+        plugins:
+          - name: cors
+            config:
+              origins: ["https://example.com"]
+              methods: ["GET","POST"]
+              headers: ["Authorization","Content-Type"]
+          - name: rate-limiting
+            config:
+              second: 10
+              minute: 600
+              policy: local
+              limit_by: ip
+
+# ---------- Global plugins (apply to all routes/services) ----------
+plugins:
+  # Global rate limiting (applies if route/service doesn't override)
+  - name: rate-limiting
+    config:
+      second: 10000
+      policy: local
+
+  # Add proxy-buffering / request-transformer globally if required
+  - name: request-transformer
+    config:
+      add:
+        headers:
+          - "X-Global-Gateway: kong"
+      remove:
+        headers: ["X-Remove-This"]
+
+# ---------- Consumers (API clients) & credentials ----------
+consumers:
+  - username: client-alpha
+    custom_id: client-alpha-001
+    tags: ["trusted"]
+  - username: client-beta
+    custom_id: client-beta-001
+
+# Key-auth credentials for consumers
+keyauth_credentials:
+  - consumer: client-alpha
+    key: "alpha-secret-key-12345"
+  - consumer: client-beta
+    key: "beta-secret-key-67890"
+
+# Example JWT credentials (requires configuring a JWT public key or secret)
+jwt_credentials:
+  - consumer: client-alpha
+    key: "client-alpha-kid"
+    secret: "replace_with_real_secret_or_use_jwt_plugin_with_public_key"
+
+# Example ACL groups and binding to consumers
+acls:
+  - consumer: client-alpha
+    group: "premium"
+  - consumer: client-beta
+    group: "standard"
+
+# ---------- Plugin instances tied to services/routes ----------
+service_plugins:
+  # Enforce key-auth on user-service
+  - service: user-service
+    plugins:
+      - name: key-auth
+        config:
+          hide_credentials: true
+
+  # Enforce key-auth on product service reads/writes
+  - service: product-catalog-service
+    plugins:
+      - name: key-auth
+        config:
+          hide_credentials: true
+
+  # Add ACL plugin to restrict certain routes to 'premium' group
+  - route: users-route
+    plugins:
+      - name: acl
+        config:
+          allow: ["premium"]
+
+# ---------- Traffic Splitting (Canary) ----------
+# Using traffic-splitting plugin on a route to split between two service versions
+# Destination names should match service names or upstream names available to Kong.
+# Example: 90% to product-v1, 10% to product-v2
+services:
+  - name: product-catalog-v1
+    url: http://product-1:8080
+  - name: product-catalog-v2
+    url: http://product-2:8080
+
+routes:
+  - name: products-canary-route
+    paths: ["/api/products"]
+    strip_path: false
+    plugins:
+      - name: traffic-splitting
+        config:
+          rules:
+            - weight: 90
+              destination: "product-catalog-v1"
+            - weight: 10
+              destination: "product-catalog-v2"
+
+# ---------- Logging & observability ----------
+# Kong logs to stdout/stderr by environment variables. For DB-less, configure datadog/loggly plugins if needed
+# Example of enabling request-termination plugin for graceful error pages
+plugins:
+  - name: response-ratelimiting
+    config:
+      status_code: 503
+
+# ---------- Notes ----------
+# - If running Kong in multi-node or distributed mode, use "policy: redis" for rate-limiting and run a Redis service.
+# - To persist logs/metrics, configure the appropriate logging plugin (file, http, datadog, etc.)
+# - Replace the placeholder secrets/keys with secure values or integrate with a secret manager.
+# - Service names (product-1, product-2, user-1) must be resolvable by Kong (docker-compose service names, Docker networks or IPs).
+# - Healthchecks above require the target apps to expose /health endpoint returning 200.
