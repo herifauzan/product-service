@@ -1,4 +1,5 @@
 version: '3.9'
+
 services:
   product-catalog-service:
     build: ./ProductCatalogService
@@ -6,29 +7,80 @@ services:
     environment:
       - ASPNETCORE_URLS=http://+:8080
       - ASPNETCORE_ENVIRONMENT=Development
-      - ConnectionStrings__DefaultConnection=Host=postgres;Database=productsdb;Username=postgres;Password=postgres
+      # Point writes to PRIMARY
+      - ConnectionStrings__DefaultConnection=Host=postgres-primary;Database=productsdb;Username=appuser;Password=apppass
+      # (Optional) add a read-only connection to the REPLICA if your app uses it:
+      # - ConnectionStrings__ReadReplica=Host=postgres-replica;Database=productsdb;Username=appuser;Password=apppass
     ports:
       - "5000:8080"
     depends_on:
-      postgres:
+      postgres-primary:
         condition: service_healthy
-  postgres:
-    image: postgres:16
-    container_name: postgres
+
+  # --- PostgreSQL PRIMARY ---
+  postgres-primary:
+    image: bitnami/postgresql:latest
+    container_name: postgres-primary
     restart: always
     environment:
-      POSTGRES_DB: productsdb
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      # App database/user
+      - POSTGRESQL_DATABASE=productsdb
+      - POSTGRESQL_USERNAME=appuser
+      - POSTGRESQL_PASSWORD=apppass
+      # Superuser (optional, Bitnami defaults to 'postgres' user with POSTGRES_PASSWORD if set)
+      - POSTGRES_PASSWORD=postgres
+      # Replication config
+      - POSTGRESQL_REPLICATION_MODE=master
+      - POSTGRESQL_REPLICATION_USER=repluser
+      - POSTGRESQL_REPLICATION_PASSWORD=replpass
+      # Synchronous replication (for “read immediately” semantics)
+      - POSTGRESQL_SYNCHRONOUS_COMMIT=on
+      - POSTGRESQL_NUM_SYNCHRONOUS_REPLICAS=1
+    volumes:
+      - pgdata_primary:/bitnami/postgresql
+      # init-db.sql only runs on first init (empty volume)
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
     ports:
       - "5432:5432"
-    volumes:
-      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U appuser -d productsdb -h 127.0.0.1"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+
+  # --- PostgreSQL REPLICA (READ-ONLY) ---
+  postgres-replica:
+    image: bitnami/postgresql:latest
+    container_name: postgres-replica
+    restart: always
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    environment:
+      - POSTGRESQL_REPLICATION_MODE=slave
+      - POSTGRESQL_PRIMARY_HOST=postgres-primary
+      - POSTGRESQL_MASTER_HOST=postgres-primary
+      - POSTGRESQL_PRIMARY_PORT_NUMBER=5432
+      - POSTGRESQL_REPLICATION_USER=repluser
+      - POSTGRESQL_REPLICATION_PASSWORD=replpass
+      # App user/password must exist on primary (it will stream to replica)
+      - POSTGRESQL_USERNAME=appuser
+      - POSTGRESQL_PASSWORD=apppass
+      - POSTGRESQL_DATABASE=productsdb
+      # Keep replica read-only
+      - POSTGRESQL_PGAUDIT_LOG=READ
+    volumes:
+      - pgdata_replica:/bitnami/postgresql
+    # Expose replica on 5433 (host) so you can test reads directly
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appuser -d productsdb -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # --- Kong (unchanged) ---
   kong:
     image: kong:3.6
     container_name: kong
@@ -43,5 +95,7 @@ services:
     ports:
       - "8000:8000"
       - "8001:8001"
+
 volumes:
-  pgdata:
+  pgdata_primary:
+  pgdata_replica:
