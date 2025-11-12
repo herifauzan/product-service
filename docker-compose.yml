@@ -1,9 +1,10 @@
 version: '3.9'
 
 services:
-  product-catalog-service:
-    build: ./ProductCatalogService
-    container_name: product_catalog_service
+  product-service:
+    #build: ./ProductCatalogService
+    image: product-catalog-dotnet-product-catalog-service:latest
+    container_name: product_service
     environment:
       - ASPNETCORE_URLS=http://+:8080
       - ASPNETCORE_ENVIRONMENT=Development
@@ -16,7 +17,23 @@ services:
     depends_on:
       postgres-primary:
         condition: service_healthy
-
+  # --read only service
+  catalog-service:
+    #build: ./ProductCatalogService
+    image: product-catalog-dotnet-product-catalog-service:latest
+    container_name: catalog_service
+    environment:
+      - ASPNETCORE_URLS=http://+:8080
+      - ASPNETCORE_ENVIRONMENT=Development
+      # Point writes to PRIMARY
+      #- ConnectionStrings__DefaultConnection=Host=postgres-primary;Database=productsdb;Username=appuser;Password=apppass
+      # (Optional) add a read-only connection to the REPLICA if your app uses it:
+      - ConnectionStrings__ReadReplica=Host=postgres-replica;Database=productsdb;Username=appuser;Password=apppass
+    ports:
+      - "5000:8080"
+    depends_on:
+      postgres-replica:
+        condition: service_healthy
   # --- PostgreSQL PRIMARY ---
   postgres-primary:
     image: bitnami/postgresql:latest
