@@ -8,6 +8,13 @@ services:
         paths:
           - /api/products
         strip_path: false
+  - name: user-service
+    url: http://user-service:3000
+    routes:
+      - name: users
+        paths:
+          - /api/users
+        strip_path: false
 plugins:
   - name: rate-limiting
     config:
